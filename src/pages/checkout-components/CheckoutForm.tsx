@@ -13,9 +13,24 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { apiRequest, queryClient } from "@/lib/queryClient";
-import { Order } from "./types";
+import { queryClient } from "@/lib/queryClient";
 import { MobilePaymentFields } from "./MobilePaymentFields";
+
+interface OrderItem {
+  name: string;
+  quantity: number;
+  price: string;
+}
+
+interface Order {
+  id: string;
+  total_fee: string;
+  tip: string;
+  items: OrderItem[];
+  restaurant_names: string[];
+  delivery_fee: number;
+  status: string;
+}
 
 interface CheckoutFormProps {
   orderId: string;
@@ -29,12 +44,45 @@ export const CheckoutForm = ({ orderId }: CheckoutFormProps) => {
   const [phoneNumber, setPhoneNumber] = useState("");
   const [mobileProvider, setMobileProvider] = useState("");
   const [depositAmount, setDepositAmount] = useState("");
+  const [voucherBalance, setVoucherBalance] = useState<number | null>(null);
 
-  // --- Fetch the order ---
-  const { data: orders, isLoading } = useQuery<Order[]>({
-    queryKey: ["/api/orders"],
+  // --- Fetch order details ---
+  const { data: currentOrder, isLoading } = useQuery<Order>({
+    queryKey: [`/api/orders/order/${orderId}`],
+    queryFn: async () => {
+      const token = localStorage.getItem("token");
+      const res = await fetch(`http://127.0.0.1:8000/api/orders/order/${orderId}/`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error("Failed to fetch order details");
+      return res.json();
+    },
   });
-  const currentOrder = orders?.find((o) => o.id === orderId);
+
+  // --- Fetch Feast Voucher Balance ---
+  useEffect(() => {
+    if (paymentMethod === "voucher") {
+      const fetchBalance = async () => {
+        const token = localStorage.getItem("token");
+        const res = await fetch("http://127.0.0.1:8000/api/payments/feast/voucher/balance/", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        setVoucherBalance(Number(data.balance));
+      };
+      fetchBalance();
+    }
+  }, [paymentMethod]);
+
+  // --- Normalize mobile phone ---
+  const normalizePhone = (phone: string) => {
+    const clean = phone.replace(/\D/g, "");
+    if (clean.startsWith("0")) return "+263" + clean.slice(1);
+    if (clean.startsWith("263")) return "+" + clean;
+    if (clean.startsWith("+")) return clean;
+    return "+263" + clean;
+  };
 
   // --- Payment Mutation ---
   const paymentMutation = useMutation({
@@ -43,12 +91,8 @@ export const CheckoutForm = ({ orderId }: CheckoutFormProps) => {
       let body: any = { order_id: orderId };
 
       if (paymentMethod === "mobile") {
-        let cleanPhone = phoneNumber.replace(/\s+/g, "").replace(/[-()]/g, "");
-        let normalizedPhone = cleanPhone;
-        if (cleanPhone.startsWith("0")) normalizedPhone = "+263" + cleanPhone.substring(1);
-        else if (cleanPhone.startsWith("263")) normalizedPhone = "+" + cleanPhone;
         body.method = "paynow";
-        body.phone = normalizedPhone;
+        body.phone = normalizePhone(phoneNumber);
         body.provider = mobileProvider;
       } else if (paymentMethod === "voucher") {
         body.method = "voucher";
@@ -56,12 +100,9 @@ export const CheckoutForm = ({ orderId }: CheckoutFormProps) => {
         body.method = "paynow";
       }
 
-      const res = await fetch("http://127.0.0.1:8000/api/payments/create-payment/", {
+      const res = await fetch("http://127.0.0.1:8000/api/payments/create/payment/", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify(body),
       });
 
@@ -69,90 +110,72 @@ export const CheckoutForm = ({ orderId }: CheckoutFormProps) => {
       return res.json();
     },
     onSuccess: (data) => {
-      // ✅ Successful voucher payment
       if (paymentMethod === "voucher" && data.status === "paid_with_voucher") {
-        toast({
-          title: "Paid with Voucher",
-          description: "Your voucher covered the full order.",
-        });
-        queryClient.invalidateQueries({ queryKey: ["/api/orders"] });
+        toast({ title: "Paid with Voucher", description: "Your voucher covered the order." });
+        queryClient.invalidateQueries({ queryKey: [`/api/orders/order/${orderId}`] });
         setTimeout(() => setLocation("/home"), 1000);
         return;
       }
 
-      // ✅ Redirect to PayNow web checkout
       if (data.paynow_url) {
-        toast({
-          title: "Redirecting to PayNow...",
-          description: "Please complete your payment.",
-        });
+        toast({ title: "Redirecting to PayNow...", description: "Please complete your payment." });
         window.location.href = data.paynow_url;
         return;
       }
 
-      // ✅ Mobile payment confirmation (poll or direct)
       if (data.status === "paid" || data.status === "Payment Successful") {
         toast({ title: "Payment Successful", description: "Redirecting..." });
         setTimeout(() => setLocation("/home"), 1500);
         return;
       }
 
-      // ❌ Unexpected
-      toast({
-        title: "Payment Failed",
-        description: "Unexpected response from payment API.",
-        variant: "destructive",
-      });
+      toast({ title: "Payment Failed", description: "Unexpected response.", variant: "destructive" });
     },
     onError: (err: any) => {
-      toast({
-        title: "Payment Failed",
-        description: err.message || "Please try again.",
-        variant: "destructive",
-      });
+      toast({ title: "Payment Failed", description: err.message || "Try again.", variant: "destructive" });
     },
   });
 
-  // --- Voucher Deposit Mutation ---
+  // --- Voucher Deposit ---
   const voucherDepositMutation = useMutation({
     mutationFn: async () => {
       const token = localStorage.getItem("token");
       const res = await fetch("http://127.0.0.1:8000/api/payments/deposit-voucher/", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({ amount: depositAmount }),
       });
       if (!res.ok) throw new Error(await res.text());
       return res.json();
     },
     onSuccess: (data) => {
-      toast({
-        title: "Deposit Started",
-        description: "Redirecting to PayNow to top up voucher balance...",
-      });
+      toast({ title: "Deposit Started", description: "Redirecting to PayNow..." });
       window.location.href = data.paynow_url;
     },
   });
 
-  // --- Poll for payment status (for mobile) ---
+  // --- Poll mobile payment ---
   useEffect(() => {
     let interval: any;
+    let attempts = 0;
     if (paymentMethod === "mobile" && paymentMutation.isSuccess) {
       interval = setInterval(async () => {
+        attempts++;
+        if (attempts > 24) {
+          clearInterval(interval);
+          toast({ title: "Payment Timeout", description: "Please try again." });
+          return;
+        }
+
         const token = localStorage.getItem("token");
-        const res = await fetch(
-          `http://127.0.0.1:8000/api/payments/check-status/${orderId}/`,
-          {
-            headers: { Authorization: `Bearer ${token}` },
-          }
-        );
+        const res = await fetch(`http://127.0.0.1:8000/api/payments/check-status/${orderId}/`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
         if (res.ok) {
           const data = await res.json();
           if (data.status === "paid" || data.status === "Payment Successful") {
-            toast({ title: "Payment Confirmed", description: "Redirecting to home..." });
+            toast({ title: "Payment Confirmed", description: "Redirecting..." });
             clearInterval(interval);
             setTimeout(() => setLocation("/home"), 1500);
           }
@@ -181,6 +204,7 @@ export const CheckoutForm = ({ orderId }: CheckoutFormProps) => {
   if (!currentOrder) return <div>Order not found</div>;
 
   const isProcessing = paymentMutation.isPending || voucherDepositMutation.isPending;
+  const totalAmount = parseFloat(currentOrder.total_fee);
 
   return (
     <Card className="max-w-md mx-auto">
@@ -189,12 +213,31 @@ export const CheckoutForm = ({ orderId }: CheckoutFormProps) => {
         <Badge variant="outline">Order #{currentOrder.id.slice(-8)}</Badge>
       </CardHeader>
       <CardContent>
+        <div className="mb-4">
+          <h2 className="font-semibold">Your Order:</h2>
+          {currentOrder.items.length === 0 ? (
+            <p>No items added yet.</p>
+          ) : (
+            <ul className="list-disc pl-5">
+              {currentOrder.items.map((item, idx) => (
+                <li key={idx}>
+                  {item.name} x {item.quantity} - ${parseFloat(item.price).toFixed(2)}
+                </li>
+              ))}
+            </ul>
+          )}
+          <p className="mt-2">
+            Delivery Fee: ${currentOrder.delivery_fee.toFixed(2)}
+          </p>
+          <p className="mt-1 font-semibold">
+            Total: ${totalAmount.toFixed(2)}
+          </p>
+        </div>
+
         <form onSubmit={handleSubmit} className="space-y-4">
           <Select
             value={paymentMethod}
-            onValueChange={(value) =>
-              setPaymentMethod(value as "web" | "mobile" | "voucher")
-            }
+            onValueChange={(value) => setPaymentMethod(value as "web" | "mobile" | "voucher")}
           >
             <SelectTrigger>
               <SelectValue placeholder="Select payment method" />
@@ -218,8 +261,10 @@ export const CheckoutForm = ({ orderId }: CheckoutFormProps) => {
           {paymentMethod === "voucher" && (
             <div className="border-t pt-3">
               <p className="text-sm text-muted-foreground mb-2">
-                Use your voucher balance to pay. If you need to deposit funds,
-                enter an amount below:
+                Your Feast Voucher Balance: ${voucherBalance !== null ? voucherBalance.toFixed(2) : "Loading..."}
+              </p>
+              <p className="text-sm text-muted-foreground mb-2">
+                Use your voucher balance to pay. To deposit funds, enter an amount:
               </p>
               <Input
                 type="number"
@@ -234,9 +279,7 @@ export const CheckoutForm = ({ orderId }: CheckoutFormProps) => {
                 onClick={() => voucherDepositMutation.mutate()}
                 disabled={!depositAmount || voucherDepositMutation.isPending}
               >
-                {voucherDepositMutation.isPending
-                  ? "Redirecting..."
-                  : "Deposit to Voucher"}
+                {voucherDepositMutation.isPending ? "Redirecting..." : "Deposit to Voucher"}
               </Button>
             </div>
           )}
@@ -244,9 +287,7 @@ export const CheckoutForm = ({ orderId }: CheckoutFormProps) => {
           <Button type="submit" disabled={isProcessing} className="w-full">
             {isProcessing
               ? "Processing..."
-              : `Pay ${currentOrder.currency} ${parseFloat(
-                  currentOrder.total.toString()
-                ).toFixed(2)}`}
+              : `Pay $${totalAmount.toFixed(2)}`}
           </Button>
         </form>
       </CardContent>
