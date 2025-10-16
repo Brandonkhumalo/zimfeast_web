@@ -88,16 +88,17 @@ export const CheckoutForm = ({ orderId }: CheckoutFormProps) => {
   const paymentMutation = useMutation({
     mutationFn: async () => {
       const token = localStorage.getItem("token");
-      let body: any = { order_id: orderId };
 
+      // Always include order_id in request body
+      const body: any = {
+        order_id: orderId,
+        method: paymentMethod === "voucher" ? "voucher" : "paynow",
+      };
+
+      // Add mobile payment details
       if (paymentMethod === "mobile") {
-        body.method = "paynow";
         body.phone = normalizePhone(phoneNumber);
         body.provider = mobileProvider;
-      } else if (paymentMethod === "voucher") {
-        body.method = "voucher";
-      } else {
-        body.method = "paynow";
       }
 
       const res = await fetch("http://127.0.0.1:8000/api/payments/create/payment/", {
@@ -109,6 +110,7 @@ export const CheckoutForm = ({ orderId }: CheckoutFormProps) => {
       if (!res.ok) throw new Error(await res.text());
       return res.json();
     },
+
     onSuccess: (data) => {
       if (paymentMethod === "voucher" && data.status === "paid_with_voucher") {
         toast({ title: "Paid with Voucher", description: "Your voucher covered the order." });
@@ -131,6 +133,7 @@ export const CheckoutForm = ({ orderId }: CheckoutFormProps) => {
 
       toast({ title: "Payment Failed", description: "Unexpected response.", variant: "destructive" });
     },
+
     onError: (err: any) => {
       toast({ title: "Payment Failed", description: err.message || "Try again.", variant: "destructive" });
     },
@@ -154,10 +157,11 @@ export const CheckoutForm = ({ orderId }: CheckoutFormProps) => {
     },
   });
 
-  // --- Poll mobile payment ---
+  // --- Poll mobile payment status ---
   useEffect(() => {
     let interval: any;
     let attempts = 0;
+
     if (paymentMethod === "mobile" && paymentMutation.isSuccess) {
       interval = setInterval(async () => {
         attempts++;
@@ -168,7 +172,8 @@ export const CheckoutForm = ({ orderId }: CheckoutFormProps) => {
         }
 
         const token = localStorage.getItem("token");
-        const res = await fetch(`http://127.0.0.1:8000/api/payments/check-status/${orderId}/`, {
+        // ✅ Ensure this endpoint matches backend: /api/payments/paynow/status/<reference>/
+        const res = await fetch(`http://127.0.0.1:8000/api/payments/paynow/status/${orderId}/`, {
           headers: { Authorization: `Bearer ${token}` },
         });
 
@@ -204,7 +209,7 @@ export const CheckoutForm = ({ orderId }: CheckoutFormProps) => {
   if (!currentOrder) return <div>Order not found</div>;
 
   const isProcessing = paymentMutation.isPending || voucherDepositMutation.isPending;
-  const totalAmount = parseFloat(currentOrder.total_fee);
+  const totalAmount = parseFloat(currentOrder.total_fee) + (parseFloat(currentOrder.tip) || 0);
 
   return (
     <Card className="max-w-md mx-auto">
@@ -226,12 +231,8 @@ export const CheckoutForm = ({ orderId }: CheckoutFormProps) => {
               ))}
             </ul>
           )}
-          <p className="mt-2">
-            Delivery Fee: ${currentOrder.delivery_fee.toFixed(2)}
-          </p>
-          <p className="mt-1 font-semibold">
-            Total: ${totalAmount.toFixed(2)}
-          </p>
+          <p className="mt-2">Delivery Fee: ${currentOrder.delivery_fee.toFixed(2)}</p>
+          <p className="mt-1 font-semibold">Total: ${totalAmount.toFixed(2)}</p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -261,7 +262,8 @@ export const CheckoutForm = ({ orderId }: CheckoutFormProps) => {
           {paymentMethod === "voucher" && (
             <div className="border-t pt-3">
               <p className="text-sm text-muted-foreground mb-2">
-                Your Feast Voucher Balance: ${voucherBalance !== null ? voucherBalance.toFixed(2) : "Loading..."}
+                Your Feast Voucher Balance: $
+                {voucherBalance !== null ? voucherBalance.toFixed(2) : "Loading..."}
               </p>
               <p className="text-sm text-muted-foreground mb-2">
                 Use your voucher balance to pay. To deposit funds, enter an amount:
@@ -285,9 +287,7 @@ export const CheckoutForm = ({ orderId }: CheckoutFormProps) => {
           )}
 
           <Button type="submit" disabled={isProcessing} className="w-full">
-            {isProcessing
-              ? "Processing..."
-              : `Pay $${totalAmount.toFixed(2)}`}
+            {isProcessing ? "Processing..." : `Pay $${totalAmount.toFixed(2)}`}
           </Button>
         </form>
       </CardContent>
